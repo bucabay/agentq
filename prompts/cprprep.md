@@ -1,6 +1,6 @@
 # CPR Prep build shift
 
-Work in `/Users/gabe/code/saas/projects/certified-payroll`.
+Work in the project checkout (set `PROJECT_DIR` in your own copy of this prompt).
 
 Your task has already been claimed for you — the details are at the bottom of this prompt. **Do not
 claim again.** Do exactly that one task and stop.

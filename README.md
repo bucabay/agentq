@@ -1,7 +1,11 @@
 # agentq
 
-A queue for scheduled agent runs, on local Postgres. Global — every project's agents share one
-database, so they can see each other.
+A queue for scheduled agent runs, on local Postgres. One database, shared by every project's
+agents, so they can see each other.
+
+Built because coordinating agents through a markdown file does not work — and then hardened twice,
+because "simple enough to reason about" turned out not to mean "obviously correct". Both
+concurrency bugs are written up below; they are the interesting part.
 
 It exists because coordinating agents through a markdown file does not work. A `WORKLOG.md` claim
 is not a lock: a scheduled agent fired while a previous run was still going, found its own claim
@@ -151,3 +155,32 @@ npm test          # needs a second database: createdb agents_test
 
 `--depends-on ID` holds a task back until that one is `done`, even if its lane is free. Use it for
 the contract-first pattern: schema task, then implementation task depending on it.
+
+
+## Two bugs worth reading about
+
+Both were found by testing, not by reading the code, and both are the kind that pass a casual
+review.
+
+**The lane invariant was not safe.** `for update skip locked` locks the row a transaction *picks* —
+not the rows its `not exists` lane check *reads*. Two concurrent claimers in READ COMMITTED each
+evaluate that check against their own snapshot, neither sees the other's uncommitted
+`state='running'`, and both take a different task in the same lane. Reproduced against Postgres 18
+with two held-open transactions.
+
+The original test missed it because that lane held **one** task — both claimers targeted the same
+row and `skip locked` masked the bug. It only appears with several tasks queued in one lane. Fixed
+with a project-scoped `pg_advisory_xact_lock` taken before the pick; there is a regression test
+with four tasks and eight claimers.
+
+**Then the fix deadlocked.** `ensureProject` ran *before* the advisory lock, so one transaction
+could hold a project row lock while waiting for the advisory lock another held while waiting for
+that row. Postgres reported it during the conformance suite. Advisory lock first, rows after,
+always.
+
+## Status
+
+30 tests. Used in anger for one project; the API is small and unlikely to churn, but this has not
+been run at any scale and nothing here has been load-tested. The
+[backend decision](docs/queue-backend.md) explains why that is fine for agent-run cadence and what
+would change the answer.
