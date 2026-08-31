@@ -1,0 +1,17 @@
+{
+  "name": "agentq",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentq": "./src/cli.mjs"
+  },
+  "scripts": {
+    "init": "node src/cli.mjs init",
+    "test": "node --test test/*.test.mjs",
+    "status": "node src/cli.mjs status"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

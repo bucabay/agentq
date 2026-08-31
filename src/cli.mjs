@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+import { hostname } from "node:os";
+import {
+  DEFAULT_URL, addTask, claim, finish, heartbeat, history, inFlight, listTasks, migrate, pool,
+} from "./db.mjs";
+
+const [, , command, ...rest] = process.argv;
+
+const args = (() => {
+  const out = {};
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (!token.startsWith("--")) continue;
+    const key = token.slice(2);
+    const next = rest[i + 1];
+    if (next === undefined || next.startsWith("--")) out[key] = true;
+    else { out[key] = next; i++; }
+  }
+  return out;
+})();
+
+const need = (key) => {
+  const value = args[key];
+  if (value === undefined) die(`missing --${key}`);
+  return value;
+};
+
+function die(message) {
+  console.error(`agentq: ${message}`);
+  process.exit(1);
+}
+
+const db = pool(args.url ?? DEFAULT_URL);
+const asJson = args.json === true;
+
+try {
+  await run();
+} catch (err) {
+  die(err.message);
+} finally {
+  await db.end();
+}
+
+async function run() {
+  switch (command) {
+    case "init": {
+      await migrate(db);
+      console.log(`agentq: schema ready at ${args.url ?? DEFAULT_URL}`);
+      break;
+    }
+
+    case "add": {
+      const task = await addTask(db, {
+        project: need("project"),
+        lane: args.lane ?? "default",
+        title: need("title"),
+        body: args.body === true ? undefined : args.body,
+        priority: args.priority ? Number(args.priority) : 100,
+        dependsOn: args["depends-on"] ? Number(args["depends-on"]) : undefined,
+      });
+      if (asJson) console.log(JSON.stringify(task, null, 2));
+      else console.log(`#${task.id}  [${task.lane}]  ${task.title}`);
+      break;
+    }
+
+    /**
+     * The command an agent runs at the start of a shift. It returns everything the agent needs to
+     * orient: which run it is, what it is meant to do, what happened before it, and who else is
+     * working right now. Exits 3 with no work so a wrapper can tell "nothing to do" from "error".
+     */
+    case "claim": {
+      const project = need("project");
+      const claimed = await claim(db, {
+        project,
+        agent: need("agent"),
+        lane: args.lane === true ? null : args.lane ?? null,
+        leaseSeconds: args.lease ? Number(args.lease) : 3600,
+        host: hostname(),
+        pid: process.pid,
+      });
+
+      if (!claimed) {
+        const busy = await inFlight(db, project);
+        const payload = { claimed: false, reason: busy.length ? "all lanes busy or nothing queued" : "nothing queued", inFlight: busy };
+        if (asJson) console.log(JSON.stringify(payload, null, 2));
+        else {
+          console.log("no task available.");
+          for (const r of busy) console.log(`  running: #${r.run_number} [${r.lane}] ${r.title} (${r.agent})`);
+        }
+        process.exit(3);
+      }
+
+      const payload = {
+        claimed: true,
+        runId: claimed.run.id,
+        runNumber: claimed.run.run_number,
+        project,
+        agent: claimed.run.agent,
+        leaseExpiresAt: claimed.run.lease_expires_at,
+        task: {
+          id: claimed.task.id, lane: claimed.task.lane,
+          title: claimed.task.title, body: claimed.task.body,
+        },
+        previousRuns: await history(db, project, args.history ? Number(args.history) : 5),
+        alsoRunning: (await inFlight(db, project)).filter((r) => r.run_number !== claimed.run.run_number),
+      };
+
+      if (asJson) console.log(JSON.stringify(payload, null, 2));
+      else {
+        console.log(`run #${payload.runNumber} (id ${payload.runId})  lane [${payload.task.lane}]`);
+        console.log(`task #${payload.task.id}: ${payload.task.title}`);
+        if (payload.task.body) console.log(`\n${payload.task.body}\n`);
+        console.log(`lease until ${new Date(payload.leaseExpiresAt).toISOString()}`);
+        if (payload.previousRuns.length) {
+          console.log("\nbefore you:");
+          for (const r of payload.previousRuns) {
+            console.log(`  #${r.run_number} ${r.state.padEnd(9)} ${r.title ?? "-"}${r.commit_sha ? ` (${r.commit_sha})` : ""}`);
+            if (r.summary) console.log(`      ${r.summary}`);
+          }
+        }
+        if (payload.alsoRunning.length) {
+          console.log("\nalso running now:");
+          for (const r of payload.alsoRunning) console.log(`  #${r.run_number} [${r.lane}] ${r.title} (${r.agent})`);
+        }
+      }
+      break;
+    }
+
+    case "done":
+    case "fail":
+    case "block": {
+      const state = command === "done" ? "done" : command === "block" ? "blocked" : "failed";
+      const run = await finish(db, Number(need("run")), {
+        state,
+        summary: args.summary === true ? undefined : args.summary,
+        commitSha: args.commit === true ? undefined : args.commit,
+      });
+      console.log(`run #${run.run_number} -> ${state}`);
+      break;
+    }
+
+    case "heartbeat": {
+      const until = await heartbeat(db, Number(need("run")), args.lease ? Number(args.lease) : 3600);
+      console.log(`lease extended to ${new Date(until).toISOString()}`);
+      break;
+    }
+
+    case "status": {
+      const project = need("project");
+      const [tasks, live, past] = await Promise.all([
+        listTasks(db, project),
+        inFlight(db, project),
+        history(db, project, args.history ? Number(args.history) : 5),
+      ]);
+      if (asJson) { console.log(JSON.stringify({ tasks, inFlight: live, history: past }, null, 2)); break; }
+      console.log(`project ${project}`);
+      console.log(`\nin flight (${live.length}):`);
+      for (const r of live) console.log(`  #${r.run_number} [${r.lane}] ${r.title} — ${r.agent}, lease to ${new Date(r.lease_expires_at).toISOString()}`);
+      console.log(`\nqueue:`);
+      for (const t of tasks) console.log(`  ${String(t.state).padEnd(8)} #${t.id} [${t.lane}] p${t.priority} ${t.title}`);
+      console.log(`\nlast ${past.length} finished:`);
+      for (const r of past) console.log(`  #${r.run_number} ${r.state.padEnd(9)} ${r.title ?? "-"}`);
+      break;
+    }
+
+    case "history": {
+      const rows = await history(db, need("project"), args.limit ? Number(args.limit) : 20);
+      if (asJson) console.log(JSON.stringify(rows, null, 2));
+      else for (const r of rows) console.log(`#${r.run_number} ${r.state.padEnd(9)} [${r.lane ?? "-"}] ${r.title ?? "-"}${r.commit_sha ? ` ${r.commit_sha}` : ""}`);
+      break;
+    }
+
+    default:
+      console.log(`agentq — a queue for scheduled agent runs
+
+  init                                          create the schema
+  add     --project P --title T [--lane L] [--body B] [--priority N] [--depends-on ID]
+  claim   --project P --agent A [--lane L] [--lease SECS] [--history N] [--json]
+  done    --run ID [--summary S] [--commit SHA]
+  block   --run ID [--summary S]
+  fail    --run ID [--summary S]
+  heartbeat --run ID [--lease SECS]
+  status  --project P [--json]
+  history --project P [--limit N] [--json]
+
+Lanes decide concurrency: one running task per lane, so different lanes run in parallel and the
+same lane queues. claim exits 3 when there is nothing to do.
+
+Database: ${DEFAULT_URL}  (override with AGENTQ_URL or --url)`);
+      if (command && command !== "help") process.exit(1);
+  }
+}
