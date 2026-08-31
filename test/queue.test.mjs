@@ -120,6 +120,45 @@ describe("concurrent claims do not collide", () => {
     );
     assert.equal(claims.filter(Boolean).length, 1);
   });
+
+  it("holds the lane invariant when SEVERAL tasks are queued in it", async () => {
+    // The regression that matters. With one task in a lane, `skip locked` masks the bug: both
+    // claimers target the same row and one loses. With several, each claimer picks a DIFFERENT
+    // row, the `not exists` lane check passes in both snapshots, and without the advisory lock
+    // both commit — two agents holding one lane. Confirmed against Postgres 18 before the fix.
+    for (const title of ["A", "B", "C", "D"]) await add({ title, lane: "solo" });
+
+    const claims = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => claim(db, { project: P, agent: `agent-${i}` })),
+    );
+
+    assert.equal(claims.filter(Boolean).length, 1, "exactly one agent may hold the lane");
+    const { rows } = await db.query(
+      "select count(*)::int n from task where project = $1 and lane = 'solo' and state = 'running'",
+      [P],
+    );
+    assert.equal(rows[0].n, 1);
+  });
+
+  it("still lets different projects claim at the same time", async () => {
+    // The advisory lock is scoped to the project, so it must not serialise across projects.
+    const OTHER = "test-project-2";
+    await db.query("delete from run where project = $1", [OTHER]);
+    await db.query("delete from task where project = $1", [OTHER]);
+    await db.query("delete from project where name = $1", [OTHER]);
+    await addTask(db, { project: OTHER, lane: "solo", title: "other" });
+    await add({ title: "mine", lane: "solo" });
+
+    const [a, b] = await Promise.all([
+      claim(db, { project: P, agent: "a" }),
+      claim(db, { project: OTHER, agent: "b" }),
+    ]);
+    assert.ok(a && b, "both projects should claim");
+
+    await db.query("delete from run where project = $1", [OTHER]);
+    await db.query("delete from task where project = $1", [OTHER]);
+    await db.query("delete from project where name = $1", [OTHER]);
+  });
 });
 
 describe("leases survive a crashed agent", () => {

@@ -72,6 +72,20 @@ export async function reapExpired(client) {
 export async function claim(db, { project, agent, lane = null, leaseSeconds = 3600, host, pid }) {
   return tx(db, async (client) => {
     await ensureProject(client, project);
+
+    // Serialise claims within this project for the duration of the transaction.
+    //
+    // Without it the lane invariant is not safe. `for update skip locked` locks the row a
+    // transaction PICKS, not the rows its `not exists` lane check READS. Two concurrent claimers
+    // in READ COMMITTED each evaluate that check against their own snapshot, neither sees the
+    // other's uncommitted `state='running'`, and both take a different task in the same lane.
+    // Verified against Postgres 18 before this line existed: two agents, one lane, both won.
+    //
+    // A project-scoped advisory lock is the cheap correct fix. Claims take milliseconds, and it is
+    // only the CLAIM that serialises — the work itself still runs in parallel across lanes, which
+    // is the whole point. Different projects claim concurrently.
+    await client.query("select pg_advisory_xact_lock(hashtext('agentq:claim'), hashtext($1))", [project]);
+
     await reapExpired(client);
 
     const { rows: picked } = await client.query(

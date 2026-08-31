@@ -41,8 +41,31 @@ lane, independent work in its own. No scheduler, no config — just a column.
 expires, the run is marked `abandoned` and the task returns to the queue. The *next* claim does the
 reaping, so nothing has to notice the crash.
 
-Claiming uses `for update skip locked`, so ten agents claiming in the same instant take ten
-different tasks rather than blocking or colliding. There is a test for exactly that.
+## How a claim stays correct
+
+One transaction does all of it:
+
+1. `pg_advisory_xact_lock('agentq:claim', <project>)` — serialises claims **within this project**
+2. reap expired leases: abandoned runs, their tasks back to `queued`
+3. `select ... for update skip locked` — pick one claimable task
+4. mark it `running`
+5. `update project set runs_started = runs_started + 1 returning` — the run number, atomically
+6. insert the `run` row with its lease
+
+Commit or nothing. A crash mid-claim leaves no half-state.
+
+**The advisory lock is load-bearing, and it was added after a real race.** `for update skip locked`
+locks the row a transaction *picks* — not the rows its `not exists` lane check *reads*. Two
+concurrent claimers in READ COMMITTED each evaluate that check against their own snapshot, neither
+sees the other's uncommitted `state='running'`, and both take a *different* task in the same lane.
+Verified against Postgres 18: two agents, one lane, both won.
+
+The original test missed it because that lane had only one task — both claimers targeted the same
+row and `skip locked` masked the bug. With several tasks queued in a lane it reproduces every time.
+There is now a regression test with four.
+
+The lock is scoped to the project, so different projects still claim concurrently, and it is held
+for the milliseconds a claim takes — only the *claim* serialises, never the work.
 
 ## Commands
 
