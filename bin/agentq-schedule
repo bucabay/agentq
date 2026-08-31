@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# agentq-schedule — install or remove a durable hourly trigger for a project.
+#
+#   agentq-schedule install <project> [--minute N]
+#   agentq-schedule remove  <project>
+#   agentq-schedule list
+#
+# Writes a launchd agent that runs `agentq-shift <project>`. launchd survives logout, reboot and
+# any Claude session ending, which is the whole point — the in-session cron did not.
+set -euo pipefail
+AGENTQ_HOME="${AGENTQ_HOME:-$HOME/code/agents}"
+ACTION="${1:-}"; PROJECT="${2:-}"
+label_for() { echo "dev.agentq.$1"; }
+plist_for() { echo "$HOME/Library/LaunchAgents/$(label_for "$1").plist"; }
+
+case "$ACTION" in
+  install)
+    [ -n "$PROJECT" ] || { echo "usage: agentq-schedule install <project> [--minute N]" >&2; exit 2; }
+    MINUTE=23
+    [ "${3:-}" = "--minute" ] && MINUTE="${4:?minute}"
+    [ -f "$AGENTQ_HOME/prompts/$PROJECT.md" ] || { echo "no prompt at prompts/$PROJECT.md" >&2; exit 1; }
+
+    LABEL="$(label_for "$PROJECT")"; PLIST="$(plist_for "$PROJECT")"
+    mkdir -p "$HOME/Library/LaunchAgents" "$AGENTQ_HOME/logs"
+    cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- agentq durable trigger for "$PROJECT".
+     The shift claims from the queue FIRST and exits without invoking Claude when there is no work,
+     so an idle hour costs one Postgres query.
+     Remove with: agentq-schedule remove $PROJECT -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$AGENTQ_HOME/bin/agentq-shift</string>
+    <string>$PROJECT</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Minute</key><integer>$MINUTE</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ThrottleInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>$AGENTQ_HOME/logs/$PROJECT-launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$AGENTQ_HOME/logs/$PROJECT-launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>AGENTQ_HOME</key><string>$AGENTQ_HOME</string></dict>
+</dict>
+</plist>
+PLISTEOF
+    launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    echo "installed $LABEL — hourly at :$MINUTE"
+    echo "  plist: $PLIST"
+    echo "  logs:  $AGENTQ_HOME/logs/$PROJECT-*.log"
+    ;;
+
+  remove)
+    [ -n "$PROJECT" ] || { echo "usage: agentq-schedule remove <project>" >&2; exit 2; }
+    PLIST="$(plist_for "$PROJECT")"
+    launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "removed $(label_for "$PROJECT")"
+    ;;
+
+  list)
+    launchctl list | grep -E 'dev\.agentq\.' || echo "no agentq schedules loaded"
+    ;;
+
+  *)
+    echo "usage: agentq-schedule {install <project> [--minute N] | remove <project> | list}" >&2
+    exit 2
+    ;;
+esac

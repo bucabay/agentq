@@ -67,6 +67,32 @@ There is now a regression test with four.
 The lock is scoped to the project, so different projects still claim concurrently, and it is held
 for the milliseconds a claim takes — only the *claim* serialises, never the work.
 
+## Running it on a schedule
+
+```sh
+agentq-schedule install cprprep --minute 23   # durable launchd trigger, hourly
+agentq-schedule list
+agentq-schedule remove cprprep
+```
+
+`agentq-shift <project>` is the entry point. **It claims before it spends anything.** No work means
+the claim exits 3 and the shift stops — no Claude invocation, no tokens. An idle hour costs one
+Postgres query and about 0.2 seconds.
+
+The prompt lives in `prompts/<project>.md`, and the claim payload — run id, run number, task, what
+ran before, who else is running — is appended to it, so the agent starts oriented and never claims
+twice.
+
+Two safety properties worth knowing:
+
+- **No PID lock.** The lease is the lock. Two overlapping shifts cannot take the same task, and a
+  shift that dies has its task reclaimed on the next claim. A plain cron wrapper needs a lock file;
+  this does not.
+- **The wrapper closes an abandoned run.** If the agent exits without calling `done`/`fail`/`block`,
+  the shift marks it failed so the lane frees immediately instead of waiting out the lease.
+
+Dry run without spending anything: `agentq-shift cprprep --dry-run`.
+
 ## Commands
 
 ```sh

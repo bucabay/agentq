@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# agentq — thin shim so the CLI works from anywhere and from launchd, which has a minimal PATH.
+set -euo pipefail
+AGENTQ_HOME="${AGENTQ_HOME:-$HOME/code/agents}"
+
+# launchd gives us almost no PATH, so find node ourselves before falling back to the environment.
+if ! command -v node >/dev/null 2>&1; then
+  [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+fi
+NODE="$(command -v node || echo /Users/gabe/.nvm/versions/node/v25.0.0/bin/node)"
+
+exec "$NODE" "$AGENTQ_HOME/src/cli.mjs" "$@"

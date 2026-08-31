@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# agentq-shift — the durable trigger. One shift for one project, driven by launchd.
+#
+#   agentq-shift <project> [--agent NAME] [--lease SECS] [--dry-run]
+#
+# The important property: IT CLAIMS BEFORE IT SPENDS ANYTHING. If the queue is empty or every
+# lane is held, the claim exits 3 and we stop — no Claude invocation, no tokens, no cost. An idle
+# hour costs one Postgres query.
+#
+# The lease is the lock, so unlike a plain cron wrapper this needs no PID file. Two overlapping
+# shifts cannot take the same task, and a shift that dies has its task reclaimed automatically.
+set -uo pipefail
+
+PROJECT="${1:-}"
+[ -n "$PROJECT" ] || { echo "usage: agentq-shift <project> [--agent NAME] [--lease SECS] [--dry-run]" >&2; exit 2; }
+shift
+
+AGENTQ_HOME="${AGENTQ_HOME:-$HOME/code/agents}"
+AGENT="shift-$(hostname -s)"
+LEASE=3600
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent) AGENT="$2"; shift 2 ;;
+    --lease) LEASE="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *) echo "agentq-shift: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+Q="$AGENTQ_HOME/bin/agentq"
+
+LOGDIR="$AGENTQ_HOME/logs"; mkdir -p "$LOGDIR"
+STAMP="$(date -u +%Y%m%d-%H%MZ)"
+LOG="$LOGDIR/$PROJECT-$STAMP.log"
+say() { echo "[$(date -u +%H:%M:%SZ)] $*" | tee -a "$LOG"; }
+
+PROMPT_FILE="$AGENTQ_HOME/prompts/$PROJECT.md"
+[ -f "$PROMPT_FILE" ] || { say "no prompt at $PROMPT_FILE"; exit 1; }
+
+say "shift start · project=$PROJECT agent=$AGENT lease=${LEASE}s"
+
+# --- claim first. Nothing is spent until this succeeds. -----------------------
+CLAIM="$("$Q" claim --project "$PROJECT" --agent "$AGENT" --lease "$LEASE" --json 2>>"$LOG")"
+STATUS=$?
+if [ $STATUS -eq 3 ]; then
+  say "no work available — stopping before invoking Claude (cost: one query)"
+  exit 0
+fi
+if [ $STATUS -ne 0 ]; then
+  say "claim failed with status $STATUS"
+  exit 1
+fi
+
+# One parse, three values, tab-separated — shelling out to node once instead of three times.
+IFS=$'\t' read -r RUN_ID RUN_NO TASK_TITLE <<<"$(printf '%s' "$CLAIM" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const c = JSON.parse(s);
+    process.stdout.write([c.runId, c.runNumber, c.task.title].join("\t"));
+  });')"
+say "claimed run #$RUN_NO (id $RUN_ID): $TASK_TITLE"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "dry run — releasing the claim"
+  "$Q" fail --run "$RUN_ID" --summary "dry run" >>"$LOG" 2>&1
+  exit 0
+fi
+
+command -v claude >/dev/null || { say "claude not on PATH"; "$Q" fail --run "$RUN_ID" --summary "claude not on PATH"; exit 1; }
+
+# The prompt gets the claim payload appended, so the agent starts already oriented and does not
+# have to claim again — double-claiming is exactly what the queue exists to prevent.
+PROMPT="$(cat "$PROMPT_FILE")
+
+---
+
+## Your claim (already made for you — do NOT claim again)
+
+You are run #$RUN_NO, run id **$RUN_ID**, agent \`$AGENT\`.
+
+Close this run before you finish, with one of:
+\`\`\`
+agentq done  --run $RUN_ID --summary \"...\" --commit <sha>
+agentq fail  --run $RUN_ID --summary \"...\"
+agentq block --run $RUN_ID --summary \"...\"
+\`\`\`
+
+The full claim payload, including your task and what ran before you:
+
+\`\`\`json
+$CLAIM
+\`\`\`
+"
+
+say "invoking claude"
+echo "$PROMPT" | claude -p --permission-mode acceptEdits >>"$LOG" 2>&1
+CLAUDE_STATUS=$?
+say "claude exited $CLAUDE_STATUS"
+
+# --- safety net -------------------------------------------------------------
+# If the agent did not close its own run, close it here. Without this a crashed Claude holds the
+# lane until the lease expires, and the next shift finds nothing to do for no good reason.
+STILL_OPEN="$("$Q" status --project "$PROJECT" --json 2>/dev/null | RUN_NO="$RUN_NO" node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    try {
+      const j = JSON.parse(s);
+      console.log(j.inFlight.some((r) => String(r.run_number) === process.env.RUN_NO) ? "yes" : "no");
+    } catch { console.log("no"); }
+  });')"
+if [ "$STILL_OPEN" = "yes" ]; then
+  say "run #$RUN_NO left open by the agent — closing it as failed so the lane frees"
+  "$Q" fail --run "$RUN_ID" --summary "agent exited $CLAUDE_STATUS without closing its run" >>"$LOG" 2>&1
+fi
+
+say "shift end"
