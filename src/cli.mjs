@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { hostname } from "node:os";
+import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import {
-  DEFAULT_URL, addTask, claim, finish, heartbeat, history, inFlight, listTasks, migrate, pool,
+  DEFAULT_URL, addTask, archiveProject, claim, finish, getProject, heartbeat, history, inFlight,
+  listProjects, listTasks, migrate, pool, upsertProject,
 } from "./providers/postgres.mjs";
 
 const [, , command, ...rest] = process.argv;
@@ -46,6 +49,56 @@ async function run() {
     case "init": {
       await migrate(db);
       console.log(`agentq: schema ready at ${args.url ?? DEFAULT_URL}`);
+      break;
+    }
+
+    /**
+     * Project registration. Separate from queueing work: `add` auto-creates a project so throwing
+     * a task at a new name just works, but a project cannot be SCHEDULED until someone says where
+     * its checkout is.
+     */
+    case "project": {
+      const sub = rest[0];
+
+      if (sub === "add" || sub === "set") {
+        const name = need("name");
+        const path = args.path === true ? undefined : args.path;
+        if (path && !existsSync(resolve(path))) die(`path does not exist: ${resolve(path)}`);
+        const project = await upsertProject(db, {
+          name,
+          path: path ? resolve(path) : undefined,
+          promptPath: args.prompt === true ? undefined : args.prompt,
+          description: args.description === true ? undefined : args.description,
+        });
+        if (asJson) console.log(JSON.stringify(project, null, 2));
+        else console.log(`${project.name}\n  path:   ${project.path ?? "(not set — cannot be scheduled)"}\n  prompt: ${project.prompt_path ?? "(auto)"}`);
+        break;
+      }
+
+      if (sub === "show") {
+        const project = await getProject(db, need("name"));
+        if (!project) die(`no such project "${args.name}"`);
+        console.log(asJson ? JSON.stringify(project, null, 2) : Object.entries(project).map(([k, v]) => `  ${k}: ${v}`).join("\n"));
+        break;
+      }
+
+      if (sub === "archive" || sub === "unarchive") {
+        const project = await archiveProject(db, need("name"), sub === "archive");
+        console.log(`${project.name} ${sub}d`);
+        break;
+      }
+
+      // Default: list. The multi-tenant overview — every project, its path, and its queue depth.
+      const projects = await listProjects(db, { includeArchived: args.all === true });
+      if (asJson) { console.log(JSON.stringify(projects, null, 2)); break; }
+      if (!projects.length) { console.log("no projects yet"); break; }
+      console.log("PROJECT              QUEUED RUN BLK  PATH");
+      for (const p of projects) {
+        const flag = p.archived_at ? " (archived)" : p.path ? "" : "  ** no path — cannot be scheduled **";
+        console.log(
+          `${p.name.padEnd(20)} ${String(p.queued).padStart(6)} ${String(p.running).padStart(3)} ${String(p.blocked).padStart(3)}  ${p.path ?? "-"}${flag}`,
+        );
+      }
       break;
     }
 
@@ -189,6 +242,10 @@ async function run() {
       console.log(`agentq — a queue for scheduled agent runs
 
   init                                          create the schema
+  project [list]                                every project, its path and queue depth
+  project add   --name N --path DIR [--prompt FILE] [--description D]
+  project show  --name N
+  project archive|unarchive --name N
   add     --project P --title T [--lane L] [--body B] [--priority N] [--depends-on ID]
   claim   --project P --agent A [--lane L] [--lease SECS] [--wait SECS] [--history N] [--json]
   done    --run ID [--summary S] [--commit SHA]

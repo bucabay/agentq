@@ -18,7 +18,20 @@ case "$ACTION" in
     [ -n "$PROJECT" ] || { echo "usage: agentq-schedule install <project> [--minute N]" >&2; exit 2; }
     MINUTE=23
     [ "${3:-}" = "--minute" ] && MINUTE="${4:?minute}"
-    [ -f "$AGENTQ_HOME/prompts/$PROJECT.md" ] || { echo "no prompt at prompts/$PROJECT.md" >&2; exit 1; }
+    # A project must be registered with a path before it can be scheduled. A trigger with no
+    # working directory fires into nowhere, and finding that out at 03:23 is worse than now.
+    PROJECT_PATH="$("$AGENTQ_HOME/bin/agentq" project show --name "$PROJECT" --json 2>/dev/null \
+      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).path??"")}catch{console.log("")}})')"
+    if [ -z "$PROJECT_PATH" ]; then
+      echo "project \"$PROJECT\" is not registered with a path." >&2
+      echo "  agentq project add --name $PROJECT --path /abs/path" >&2
+      exit 1
+    fi
+    [ -d "$PROJECT_PATH" ] || { echo "project path does not exist: $PROJECT_PATH" >&2; exit 1; }
+    if [ ! -f "$PROJECT_PATH/.agentq/prompt.md" ] && [ ! -f "$AGENTQ_HOME/prompts/$PROJECT.md" ]; then
+      echo "no prompt for \"$PROJECT\". Create $PROJECT_PATH/.agentq/prompt.md" >&2
+      exit 1
+    fi
 
     LABEL="$(label_for "$PROJECT")"; PLIST="$(plist_for "$PROJECT")"
     mkdir -p "$HOME/Library/LaunchAgents" "$AGENTQ_HOME/logs"
@@ -51,6 +64,7 @@ PLISTEOF
     launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
     echo "installed $LABEL — hourly at :$MINUTE"
+    echo "  project: $PROJECT_PATH"
     echo "  plist: $PLIST"
     echo "  logs:  $AGENTQ_HOME/logs/$PROJECT-*.log"
     ;;

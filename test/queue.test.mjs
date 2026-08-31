@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, describe, it } from "node:test";
-import { addTask, claim, finish, heartbeat, history, inFlight, migrate, pool } from "../src/providers/postgres.mjs";
+import {
+  addTask, archiveProject, claim, finish, heartbeat, history, inFlight, listProjects, listTasks,
+  migrate, pool, upsertProject,
+} from "../src/providers/postgres.mjs";
 
 const URL = process.env.AGENTQ_TEST_URL ?? "postgres://127.0.0.1:5432/agents_test";
 const db = pool(URL);
@@ -257,5 +260,99 @@ describe("what happened before me", () => {
     const past = await history(db, P, 10);
     assert.deepEqual(past.map((r) => r.title), ["three", "two", "one"]);
     assert.equal(past[0].run_number, 3);
+  });
+});
+
+describe("multi-tenancy", () => {
+  const A = "tenant-a";
+  const B = "tenant-b";
+
+  const wipe = async (name) => {
+    await db.query("delete from run where project = $1", [name]);
+    await db.query("delete from task where project = $1", [name]);
+    await db.query("delete from project where name = $1", [name]);
+  };
+
+  beforeEach(async () => { await wipe(A); await wipe(B); });
+  after(async () => { await wipe(A); await wipe(B); });
+
+  it("registers a project with its checkout path", async () => {
+    const p = await upsertProject(db, { name: A, path: "/tmp/a", description: "first" });
+    assert.equal(p.path, "/tmp/a");
+    assert.equal(p.description, "first");
+  });
+
+  it("updates settings without clobbering the ones not supplied", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a", description: "first" });
+    const p = await upsertProject(db, { name: A, promptPath: "/tmp/a/prompt.md" });
+    assert.equal(p.path, "/tmp/a", "path must survive an update that does not mention it");
+    assert.equal(p.description, "first");
+    assert.equal(p.prompt_path, "/tmp/a/prompt.md");
+  });
+
+  it("keeps lanes scoped per project — the same lane name runs in both", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a" });
+    await upsertProject(db, { name: B, path: "/tmp/b" });
+    await addTask(db, { project: A, lane: "api", title: "a-work" });
+    await addTask(db, { project: B, lane: "api", title: "b-work" });
+
+    const [ca, cb] = await Promise.all([
+      claim(db, { project: A, agent: "a" }),
+      claim(db, { project: B, agent: "b" }),
+    ]);
+    assert.ok(ca && cb, "a busy lane in one project must not block the same lane name in another");
+    assert.equal(ca.task.title, "a-work");
+    assert.equal(cb.task.title, "b-work");
+  });
+
+  it("numbers runs per project, not globally", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a" });
+    await upsertProject(db, { name: B, path: "/tmp/b" });
+    await addTask(db, { project: A, lane: "x", title: "a1" });
+    await addTask(db, { project: B, lane: "x", title: "b1" });
+    const ca = await claim(db, { project: A, agent: "a" });
+    const cb = await claim(db, { project: B, agent: "b" });
+    assert.equal(ca.run.run_number, 1);
+    assert.equal(cb.run.run_number, 1, "each tenant starts at 1");
+  });
+
+  it("never shows one project another's history", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a" });
+    await upsertProject(db, { name: B, path: "/tmp/b" });
+    await addTask(db, { project: A, lane: "x", title: "a-secret" });
+    const ca = await claim(db, { project: A, agent: "a" });
+    await finish(db, ca.run.id, { state: "done", summary: "a-only" });
+
+    assert.deepEqual(await history(db, B, 10), []);
+    assert.equal((await history(db, A, 10)).length, 1);
+  });
+
+  it("reports queue depth per project in the overview", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a" });
+    await upsertProject(db, { name: B, path: "/tmp/b" });
+    await addTask(db, { project: A, lane: "x", title: "1" });
+    await addTask(db, { project: A, lane: "y", title: "2" });
+    await addTask(db, { project: B, lane: "x", title: "3" });
+
+    const byName = Object.fromEntries((await listProjects(db)).map((p) => [p.name, p]));
+    assert.equal(byName[A].queued, 2);
+    assert.equal(byName[B].queued, 1);
+  });
+
+  it("hides archived projects from the default listing but keeps their work", async () => {
+    await upsertProject(db, { name: A, path: "/tmp/a" });
+    await addTask(db, { project: A, lane: "x", title: "still here" });
+    await archiveProject(db, A);
+
+    assert.ok(!(await listProjects(db)).some((p) => p.name === A));
+    assert.ok((await listProjects(db, { includeArchived: true })).some((p) => p.name === A));
+    assert.equal((await listTasks(db, A)).length, 1, "archiving must not delete queued work");
+
+    await archiveProject(db, A, false);
+    assert.ok((await listProjects(db)).some((p) => p.name === A));
+  });
+
+  it("refuses to archive a project that does not exist", async () => {
+    await assert.rejects(() => archiveProject(db, "no-such-project"), /no such project/);
   });
 });

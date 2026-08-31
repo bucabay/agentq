@@ -37,10 +37,49 @@ STAMP="$(date -u +%Y%m%d-%H%MZ)"
 LOG="$LOGDIR/$PROJECT-$STAMP.log"
 say() { echo "[$(date -u +%H:%M:%SZ)] $*" | tee -a "$LOG"; }
 
-PROMPT_FILE="$AGENTQ_HOME/prompts/$PROJECT.md"
-[ -f "$PROMPT_FILE" ] || { say "no prompt at $PROMPT_FILE"; exit 1; }
+# --- resolve the tenant --------------------------------------------------------
+# Everything about WHERE to work comes from the project row, not from this script. That is what
+# makes one installation serve many projects: the trigger is generic, the tenant carries its own
+# checkout and prompt.
+PROJECT_JSON="$("$Q" project show --name "$PROJECT" --json 2>/dev/null || true)"
+if [ -z "$PROJECT_JSON" ]; then
+  say "project \"$PROJECT\" is not registered — run: agentq project add --name $PROJECT --path /abs/path"
+  exit 1
+fi
+
+# Fields are separated by ASCII unit separator, NOT tab: tab is IFS whitespace, so bash collapses
+# runs of it and one empty field silently shifts every field after it. That bug briefly made every
+# project look archived.
+US=$'\x1f'
+IFS="$US" read -r PROJECT_DIR PROMPT_OVERRIDE ARCHIVED <<<"$(printf '%s' "$PROJECT_JSON" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const p = JSON.parse(s);
+    process.stdout.write([p.path ?? "", p.prompt_path ?? "", p.archived_at ? "yes" : "no"].join("\x1f"));
+  });')"
+
+[ "$ARCHIVED" = "no" ] || { say "project \"$PROJECT\" is archived — skipping"; exit 0; }
+[ -n "$PROJECT_DIR" ] || { say "project \"$PROJECT\" has no path — set one: agentq project set --name $PROJECT --path /abs/path"; exit 1; }
+[ -d "$PROJECT_DIR" ] || { say "project path does not exist: $PROJECT_DIR"; exit 1; }
+
+# Prompt resolution, most specific first. A project carrying its own prompt in .agentq/prompt.md is
+# the multi-tenant default: the instructions live with the code they describe and travel with it.
+if [ -n "$PROMPT_OVERRIDE" ] && [ -f "$PROMPT_OVERRIDE" ]; then
+  PROMPT_FILE="$PROMPT_OVERRIDE"
+elif [ -f "$PROJECT_DIR/.agentq/prompt.md" ]; then
+  PROMPT_FILE="$PROJECT_DIR/.agentq/prompt.md"
+elif [ -f "$AGENTQ_HOME/prompts/$PROJECT.md" ]; then
+  PROMPT_FILE="$AGENTQ_HOME/prompts/$PROJECT.md"
+else
+  say "no prompt found. Looked at: \$prompt_path, $PROJECT_DIR/.agentq/prompt.md, $AGENTQ_HOME/prompts/$PROJECT.md"
+  exit 1
+fi
 
 say "shift start · project=$PROJECT agent=$AGENT lease=${LEASE}s"
+say "  dir:    $PROJECT_DIR"
+say "  prompt: $PROMPT_FILE"
+
+cd "$PROJECT_DIR" || { say "cannot cd to $PROJECT_DIR"; exit 1; }
 
 # --- claim first. Nothing is spent until this succeeds. -----------------------
 CLAIM="$("$Q" claim --project "$PROJECT" --agent "$AGENT" --lease "$LEASE" --json 2>>"$LOG")"
@@ -54,12 +93,12 @@ if [ $STATUS -ne 0 ]; then
   exit 1
 fi
 
-# One parse, three values, tab-separated — shelling out to node once instead of three times.
-IFS=$'\t' read -r RUN_ID RUN_NO TASK_TITLE <<<"$(printf '%s' "$CLAIM" | node -e '
+# One parse, three values — shelling out to node once instead of three times.
+IFS="$US" read -r RUN_ID RUN_NO TASK_TITLE <<<"$(printf '%s' "$CLAIM" | node -e '
   let s = "";
   process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const c = JSON.parse(s);
-    process.stdout.write([c.runId, c.runNumber, c.task.title].join("\t"));
+    process.stdout.write([c.runId, c.runNumber, c.task.title].join("\x1f"));
   });')"
 say "claimed run #$RUN_NO (id $RUN_ID): $TASK_TITLE"
 
@@ -79,7 +118,9 @@ PROMPT="$(cat "$PROMPT_FILE")
 
 ## Your claim (already made for you — do NOT claim again)
 
-You are run #$RUN_NO, run id **$RUN_ID**, agent \`$AGENT\`.
+You are run #$RUN_NO, run id **$RUN_ID**, agent \`$AGENT\`, on project \`$PROJECT\`.
+
+Your working directory is **\`$PROJECT_DIR\`** and you are already in it.
 
 Close this run before you finish, with one of:
 \`\`\`

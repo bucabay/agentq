@@ -18,6 +18,16 @@
  *   migrate()                                                   -> idempotent schema setup
  *   close()                                                     -> release resources
  *
+ *   upsertProject({name, path, promptPath, description})        -> project
+ *   getProject(name)                                            -> project | null
+ *   listProjects({includeArchived})                             -> projects with queue depth
+ *   archiveProject(name, archived)                              -> project
+ *
+ * MULTI-TENANCY. Tasks, runs and run numbering are all scoped by project, so several projects
+ * share one queue without seeing each other's work. A project carries the absolute `path` of its
+ * checkout: queueing work into an unknown project auto-creates it, but SCHEDULING one requires a
+ * path, because a trigger without a working directory fires into nowhere.
+ *
  * INVARIANTS a provider must hold. The conformance suite checks all of them:
  *
  *   1. A task is handed to at most one live run. Ever.
@@ -35,6 +45,7 @@
 
 export const PROVIDER_METHODS = [
   "addTask", "claim", "finish", "heartbeat", "history", "inFlight", "listTasks", "migrate", "close",
+  "upsertProject", "getProject", "listProjects", "archiveProject",
 ];
 
 /** Throws unless `provider` implements the whole contract. Cheap guard at construction time. */

@@ -13,7 +13,7 @@ export function pool(url = DEFAULT_URL) {
   return new pg.Pool({ connectionString: url, max: 4 });
 }
 
-const MIGRATIONS = ["001_init.sql", "002_heartbeat.sql"];
+const MIGRATIONS = ["001_init.sql", "002_heartbeat.sql", "003_project_path.sql"];
 
 export async function migrate(db) {
   for (const file of MIGRATIONS) {
@@ -237,8 +237,65 @@ export function createPostgresProvider(url = DEFAULT_URL) {
     history: (project, limit) => history(db, project, limit),
     inFlight: (project) => inFlight(db, project),
     listTasks: (project, states) => listTasks(db, project, states),
+    upsertProject: (opts) => upsertProject(db, opts),
+    getProject: (name) => getProject(db, name),
+    listProjects: (opts) => listProjects(db, opts),
+    archiveProject: (name, archived) => archiveProject(db, name, archived),
     close: () => db.end(),
     /** Escape hatch for the CLI's few raw queries. Providers are not required to expose this. */
     raw: (text, params) => db.query(text, params),
   };
+}
+
+// ---------------------------------------------------------------- projects
+
+/**
+ * Registers a project or updates its settings. Separate from the implicit `ensureProject` that
+ * `addTask` does: queueing work into a new project should just work, but SCHEDULING one requires
+ * somebody to say where the checkout is. The two paths have different bars deliberately.
+ */
+export async function upsertProject(db, { name, path, promptPath, description }) {
+  const { rows } = await db.query(
+    `insert into project (name, path, prompt_path, description)
+     values ($1, $2, $3, $4)
+     on conflict (name) do update set
+       path        = coalesce(excluded.path, project.path),
+       prompt_path = coalesce(excluded.prompt_path, project.prompt_path),
+       description = coalesce(excluded.description, project.description)
+     returning *`,
+    [name, path ?? null, promptPath ?? null, description ?? null],
+  );
+  return rows[0];
+}
+
+export async function getProject(db, name) {
+  const { rows } = await db.query("select * from project where name = $1", [name]);
+  return rows[0] ?? null;
+}
+
+/** Every project with its queue depth and live-run count — the multi-tenant overview. */
+export async function listProjects(db, { includeArchived = false } = {}) {
+  const { rows } = await db.query(
+    `select p.*,
+            (select count(*) from task t
+              where t.project = p.name and t.state = 'queued')::int  as queued,
+            (select count(*) from task t
+              where t.project = p.name and t.state = 'running')::int as running,
+            (select count(*) from task t
+              where t.project = p.name and t.state = 'blocked')::int as blocked
+       from project p
+      where ($1 or p.archived_at is null)
+      order by p.name`,
+    [includeArchived],
+  );
+  return rows;
+}
+
+export async function archiveProject(db, name, archived = true) {
+  const { rows } = await db.query(
+    "update project set archived_at = case when $2 then now() else null end where name = $1 returning *",
+    [name, archived],
+  );
+  if (!rows[0]) throw new Error(`no such project "${name}"`);
+  return rows[0];
 }

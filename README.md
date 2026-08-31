@@ -71,6 +71,32 @@ There is now a regression test with four.
 The lock is scoped to the project, so different projects still claim concurrently, and it is held
 for the milliseconds a claim takes — only the *claim* serialises, never the work.
 
+## Multi-tenant
+
+One installation, one database, many projects. Tasks, runs, run numbering and lanes are all scoped
+per project — the same lane name is busy in one project and free in another, and each tenant's run
+numbers start at 1.
+
+```sh
+agentq project add --name myapp --path ~/code/myapp --description "..."
+agentq project                       # every project, its path, and its queue depth
+agentq project archive --name myapp  # stops scheduling; queued work is kept
+```
+
+```
+PROJECT              QUEUED RUN BLK  PATH
+cprprep                   5   0   0  /Users/gabe/code/saas/projects/certified-payroll
+demo-two                  0   0   0  /Users/gabe/code/agents
+```
+
+**A project carries its own checkout path**, and the shift `cd`s there before invoking the agent.
+Queueing work into an unknown project auto-creates it, but *scheduling* one requires a path — a
+trigger with no working directory fires into nowhere, and the install refuses rather than letting
+you find that out at 03:23.
+
+**Prompts live with the project** they describe, at `<path>/.agentq/prompt.md`. Resolution order is
+an explicit `--prompt` override, then that file, then `prompts/<name>.md` here as a fallback.
+
 ## Running it on a schedule
 
 ```sh
