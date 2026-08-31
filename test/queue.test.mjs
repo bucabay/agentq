@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, describe, it } from "node:test";
-import { addTask, claim, finish, heartbeat, history, inFlight, migrate, pool } from "../src/db.mjs";
+import { addTask, claim, finish, heartbeat, history, inFlight, migrate, pool } from "../src/providers/postgres.mjs";
 
 const URL = process.env.AGENTQ_TEST_URL ?? "postgres://127.0.0.1:5432/agents_test";
 const db = pool(URL);

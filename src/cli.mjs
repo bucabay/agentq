@@ -2,7 +2,7 @@
 import { hostname } from "node:os";
 import {
   DEFAULT_URL, addTask, claim, finish, heartbeat, history, inFlight, listTasks, migrate, pool,
-} from "./db.mjs";
+} from "./providers/postgres.mjs";
 
 const [, , command, ...rest] = process.argv;
 
@@ -70,14 +70,29 @@ async function run() {
      */
     case "claim": {
       const project = need("project");
-      const claimed = await claim(db, {
+      const opts = {
         project,
         agent: need("agent"),
         lane: args.lane === true ? null : args.lane ?? null,
         leaseSeconds: args.lease ? Number(args.lease) : 3600,
         host: hostname(),
         pid: process.pid,
-      });
+      };
+
+      // --wait polls instead of returning empty. Deliberately polling, not LISTEN/NOTIFY:
+      // NOTIFY needs a dedicated connection per waiter, breaks behind a transaction-mode pooler,
+      // and drops notifications while a listener is reconnecting — so the reliable pattern needs
+      // polling as a fallback anyway. At agent cadence one query every few seconds is free, and a
+      // poll loop is a thing you can read in one sitting.
+      const waitSeconds = args.wait ? Number(args.wait) : 0;
+      const deadline = Date.now() + waitSeconds * 1000;
+      let claimed = await claim(db, opts);
+      while (!claimed && Date.now() < deadline) {
+        // Jitter so a fleet restarting together does not stampede the database in lockstep.
+        const pause = 2000 + Math.floor(Math.random() * 2000);
+        await new Promise((r) => setTimeout(r, Math.min(pause, Math.max(0, deadline - Date.now()))));
+        claimed = await claim(db, opts);
+      }
 
       if (!claimed) {
         const busy = await inFlight(db, project);
@@ -155,7 +170,7 @@ async function run() {
       if (asJson) { console.log(JSON.stringify({ tasks, inFlight: live, history: past }, null, 2)); break; }
       console.log(`project ${project}`);
       console.log(`\nin flight (${live.length}):`);
-      for (const r of live) console.log(`  #${r.run_number} [${r.lane}] ${r.title} — ${r.agent}, lease to ${new Date(r.lease_expires_at).toISOString()}`);
+      for (const r of live) console.log(`  #${r.run_number} [${r.lane}] ${r.title} — ${r.agent}, silent ${r.silent_seconds}s, lease to ${new Date(r.lease_expires_at).toISOString()}`);
       console.log(`\nqueue:`);
       for (const t of tasks) console.log(`  ${String(t.state).padEnd(8)} #${t.id} [${t.lane}] p${t.priority} ${t.title}`);
       console.log(`\nlast ${past.length} finished:`);
@@ -175,7 +190,7 @@ async function run() {
 
   init                                          create the schema
   add     --project P --title T [--lane L] [--body B] [--priority N] [--depends-on ID]
-  claim   --project P --agent A [--lane L] [--lease SECS] [--history N] [--json]
+  claim   --project P --agent A [--lane L] [--lease SECS] [--wait SECS] [--history N] [--json]
   done    --run ID [--summary S] [--commit SHA]
   block   --run ID [--summary S]
   fail    --run ID [--summary S]
@@ -184,7 +199,8 @@ async function run() {
   history --project P [--limit N] [--json]
 
 Lanes decide concurrency: one running task per lane, so different lanes run in parallel and the
-same lane queues. claim exits 3 when there is nothing to do.
+same lane queues. claim exits 3 when there is nothing to do; --wait polls for that many seconds
+before giving up.
 
 Database: ${DEFAULT_URL}  (override with AGENTQ_URL or --url)`);
       if (command && command !== "help") process.exit(1);

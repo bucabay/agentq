@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const sqlDir = join(here, "..", "..", "sql");
 
 export const DEFAULT_URL =
   process.env.AGENTQ_URL ?? "postgres://127.0.0.1:5432/agents";
@@ -12,8 +13,12 @@ export function pool(url = DEFAULT_URL) {
   return new pg.Pool({ connectionString: url, max: 4 });
 }
 
+const MIGRATIONS = ["001_init.sql", "002_heartbeat.sql"];
+
 export async function migrate(db) {
-  await db.query(readFileSync(join(here, "..", "sql", "001_init.sql"), "utf8"));
+  for (const file of MIGRATIONS) {
+    await db.query(readFileSync(join(sqlDir, file), "utf8"));
+  }
 }
 
 /** Runs fn inside a transaction, rolling back on any throw. */
@@ -47,7 +52,10 @@ export async function reapExpired(client) {
   const { rows } = await client.query(`
     with dead as (
       update run set state = 'abandoned', finished_at = now(),
-             summary = coalesce(summary, 'lease expired; agent did not report back')
+             summary = coalesce(
+               summary,
+               'lease expired; last ping ' ||
+                 round(extract(epoch from (now() - last_heartbeat_at)))::text || 's before reaping')
        where state = 'running' and lease_expires_at < now()
       returning task_id, project, run_number
     )
@@ -71,8 +79,11 @@ export async function reapExpired(client) {
  */
 export async function claim(db, { project, agent, lane = null, leaseSeconds = 3600, host, pid }) {
   return tx(db, async (client) => {
-    await ensureProject(client, project);
-
+    // Take the advisory lock FIRST, before any row is touched. Lock ordering matters: with
+    // ensureProject ahead of it, one transaction could hold a project row lock while waiting for
+    // the advisory lock that another holds while waiting for that row — a genuine deadlock, which
+    // Postgres duly reported during testing. Advisory lock first, rows after, always.
+    //
     // Serialise claims within this project for the duration of the transaction.
     //
     // Without it the lane invariant is not safe. `for update skip locked` locks the row a
@@ -85,7 +96,7 @@ export async function claim(db, { project, agent, lane = null, leaseSeconds = 36
     // only the CLAIM that serialises — the work itself still runs in parallel across lanes, which
     // is the whole point. Different projects claim concurrently.
     await client.query("select pg_advisory_xact_lock(hashtext('agentq:claim'), hashtext($1))", [project]);
-
+    await ensureProject(client, project);
     await reapExpired(client);
 
     const { rows: picked } = await client.query(
@@ -145,7 +156,9 @@ export async function history(db, project, limit = 5) {
 /** Runs currently holding a lease — who else is working right now, and in which lane. */
 export async function inFlight(db, project) {
   const { rows } = await db.query(
-    `select r.run_number, r.agent, r.started_at, r.lease_expires_at, t.title, t.lane
+    `select r.run_number, r.agent, r.started_at, r.lease_expires_at, r.last_heartbeat_at,
+            round(extract(epoch from (now() - r.last_heartbeat_at)))::int as silent_seconds,
+            t.title, t.lane
        from run r join task t on t.id = r.task_id
       where r.project = $1 and r.state = 'running'
       order by r.run_number`,
@@ -178,8 +191,9 @@ export async function finish(db, runId, { state, summary, commitSha }) {
 
 export async function heartbeat(db, runId, leaseSeconds = 3600) {
   const { rows } = await db.query(
-    `update run set lease_expires_at = now() + make_interval(secs => $2)
-      where id = $1 and state = 'running' returning lease_expires_at`,
+    `update run set lease_expires_at = now() + make_interval(secs => $2),
+                    last_heartbeat_at = now()
+      where id = $1 and state = 'running' returning lease_expires_at, last_heartbeat_at`,
     [runId, leaseSeconds],
   );
   if (!rows[0]) throw new Error(`run ${runId} is not running`);
@@ -204,4 +218,27 @@ export async function listTasks(db, project, states = ["queued", "running", "blo
     [project, states],
   );
   return rows;
+}
+
+/**
+ * The provider object. The functions above stay exported for direct use and for the tests that
+ * predate the contract; this is the shape `createProvider` returns.
+ */
+export function createPostgresProvider(url = DEFAULT_URL) {
+  const db = pool(url);
+  return {
+    kind: "postgres",
+    url,
+    migrate: () => migrate(db),
+    addTask: (opts) => addTask(db, opts),
+    claim: (opts) => claim(db, opts),
+    finish: (runId, opts) => finish(db, runId, opts),
+    heartbeat: (runId, leaseSeconds) => heartbeat(db, runId, leaseSeconds),
+    history: (project, limit) => history(db, project, limit),
+    inFlight: (project) => inFlight(db, project),
+    listTasks: (project, states) => listTasks(db, project, states),
+    close: () => db.end(),
+    /** Escape hatch for the CLI's few raw queries. Providers are not required to expose this. */
+    raw: (text, params) => db.query(text, params),
+  };
 }

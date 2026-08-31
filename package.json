@@ -8,7 +8,7 @@
   },
   "scripts": {
     "init": "node src/cli.mjs init",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "status": "node src/cli.mjs status"
   },
   "dependencies": {

@@ -97,6 +97,19 @@ agentq history --project P [--limit N]
 `fail` requeues, `block` does not. That distinction matters: a transient error should be retried, a
 question for a human should not be picked up again by the next agent.
 
+## Backends
+
+Postgres today. `createProvider(url)` picks by URL scheme, so `AGENTQ_URL` is the whole selection
+mechanism — no config file, no registry. `redis://` throws with a pointer to the reasoning.
+
+Why Postgres and not Redis or Durable Objects, with the numbers:
+[`docs/queue-backend.md`](docs/queue-backend.md). Short version — this queue moves about 0.005
+jobs/second and Postgres is within 8% of a broker below 1,000 jobs/minute, so throughput is not an
+input to the decision. Fewest moving parts wins, and Postgres was already running.
+
+`src/provider.mjs` documents the seven invariants a provider must hold; `test/conformance.mjs`
+checks them. A second backend earns the name by passing that suite.
+
 ## Setup
 
 Needs a running Postgres. Uses `postgres://127.0.0.1:5432/agents`, override with `AGENTQ_URL`.
