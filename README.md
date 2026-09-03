@@ -97,6 +97,13 @@ you find that out at 03:23.
 **Prompts live with the project** they describe, at `<path>/.agentq/prompt.md`. Resolution order is
 an explicit `--prompt` override, then that file, then `prompts/<name>.md` here as a fallback.
 
+Two optional files sit beside the prompt: `.agentq/allowed-tools` (Claude Code permission
+patterns the headless run may use, one per line) and `.agentq/claude-flags` (extra `claude -p`
+flags, one per line; the MailKite promotion lanes pass `--chrome` so the run gets the
+claude-in-chrome extension tools, which a plain `claude -p` does not have).
+
+Priority is ascending: `--priority 1` is claimed before `--priority 100` (the default).
+
 ## Running it on a schedule
 
 ```sh
