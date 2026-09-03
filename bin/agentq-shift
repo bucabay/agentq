@@ -136,8 +136,25 @@ $CLAIM
 \`\`\`
 "
 
+# --- tool permissions -----------------------------------------------------------
+# Headless `claude -p` has nobody to answer a permission prompt, so every tool call that is not
+# already allowed by ~/.claude/settings.json is DENIED. `agentq` itself is therefore always granted
+# here: a run that cannot call `agentq done` cannot close, its lease expires as failed and the task
+# requeues — cprprep's task 2 was claimed 25 times that way before this line existed.
+# A tenant grants whatever else its prompt needs in <project>/.agentq/allowed-tools, one Claude Code
+# permission pattern per line (e.g. `Bash(curl:*)`, `WebFetch`); blank lines and # comments ignored.
+ALLOWED=("Bash(agentq:*)" "Bash($Q:*)")
+if [ -f "$PROJECT_DIR/.agentq/allowed-tools" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && ALLOWED+=("$line")
+  done < "$PROJECT_DIR/.agentq/allowed-tools"
+fi
+say "allowed tools: ${ALLOWED[*]}"
+
 say "invoking claude"
-echo "$PROMPT" | claude -p --permission-mode acceptEdits >>"$LOG" 2>&1
+echo "$PROMPT" | claude -p --permission-mode acceptEdits --allowedTools "${ALLOWED[@]}" >>"$LOG" 2>&1
 CLAUDE_STATUS=$?
 say "claude exited $CLAUDE_STATUS"
 

@@ -123,6 +123,14 @@ Two safety properties worth knowing:
 
 Dry run without spending anything: `agentq-shift cprprep --dry-run`.
 
+**Tool permissions.** Headless `claude -p` has nobody to answer a permission prompt, so any tool call
+not already allowed by `~/.claude/settings.json` is denied. The shift always grants `agentq` itself
+(`--allowedTools "Bash(agentq:*)"`) — a run that cannot call `agentq done` cannot close, its lease
+expires as `failed` and the task requeues; cprprep's task 2 was claimed 25 times that way. Whatever
+else a tenant's prompt needs goes in `<path>/.agentq/allowed-tools`, one Claude Code permission
+pattern per line (`Bash(curl:*)`, `WebFetch`, …); blank lines and `#` comments are ignored. The
+shift logs the final list as `allowed tools:` at the top of every run.
+
 ## Commands
 
 ```sh
