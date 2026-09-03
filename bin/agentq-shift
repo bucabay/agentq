@@ -3,6 +3,9 @@
 #
 #   agentq-shift <project> [--agent NAME] [--lease SECS] [--dry-run]
 #
+# Per-project knobs, both optional, both in <path>/.agentq/: `allowed-tools` (Claude Code
+# permission patterns, one per line) and `claude-flags` (extra `claude -p` flags, e.g. --chrome).
+#
 # The important property: IT CLAIMS BEFORE IT SPENDS ANYTHING. If the queue is empty or every
 # lane is held, the claim exits 3 and we stop — no Claude invocation, no tokens, no cost. An idle
 # hour costs one Postgres query.
@@ -153,8 +156,23 @@ if [ -f "$PROJECT_DIR/.agentq/allowed-tools" ]; then
 fi
 say "allowed tools: ${ALLOWED[*]}"
 
+# --- extra claude flags --------------------------------------------------------
+# A tenant that needs more than the default headless session lists flags in
+# <project>/.agentq/claude-flags, one per line (blank lines and # comments ignored). The
+# promotion lanes use `--chrome` so the run gets the claude-in-chrome extension tools; a plain
+# `claude -p` has no browser tools at all.
+FLAGS=()
+if [ -f "$PROJECT_DIR/.agentq/claude-flags" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && FLAGS+=("$line")
+  done < "$PROJECT_DIR/.agentq/claude-flags"
+fi
+[ ${#FLAGS[@]} -gt 0 ] && say "claude flags: ${FLAGS[*]}"
+
 say "invoking claude"
-echo "$PROMPT" | claude -p --permission-mode acceptEdits --allowedTools "${ALLOWED[@]}" >>"$LOG" 2>&1
+echo "$PROMPT" | claude -p ${FLAGS[@]+"${FLAGS[@]}"} --permission-mode acceptEdits --allowedTools "${ALLOWED[@]}" >>"$LOG" 2>&1
 CLAUDE_STATUS=$?
 say "claude exited $CLAUDE_STATUS"
 
