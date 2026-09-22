@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "agentq": "./src/cli.mjs"
+    "agentq": "./src/cli.mjs",
+    "subq": "./src/subq.mjs"
   },
   "scripts": {
     "init": "node src/cli.mjs init",

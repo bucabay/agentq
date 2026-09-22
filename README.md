@@ -104,6 +104,29 @@ claude-in-chrome extension tools, which a plain `claude -p` does not have).
 
 Priority is ascending: `--priority 1` is claimed before `--priority 100` (the default).
 
+## Recurring lanes, config outside the checkout, env hooks
+
+Three additions from 2026-09-03, when the MailKite promotion/outreach lanes moved here from a
+dozen launchd plists and cron entries:
+
+- **`projects/<name>/`** — a per-project config dir under `AGENTQ_HOME` that wins over the
+  checkout's `.agentq/`. Use it when the checkout cannot carry config: a public repo
+  (`mailkite-submissions` runs in the public saas-startup template), a worktree that is reset every
+  run (`mailkite-template-outreach`), or several projects sharing one checkout. Same files as
+  `.agentq/`: `prompt.md`, `allowed-tools`, `claude-flags`, `pre-shift`, `env`, `lanes.conf`.
+- **`env`** — a bash fragment the shift *sources* in the checkout after the pre-shift and before
+  the claim. It exports what the run needs (a token read off the secrets volume, `GIT_AUTHOR_*`,
+  `MK_AGENT`, PATH additions) and may `return 1` to stop the shift before anything is spent.
+  Both hooks see `AGENTQ_PROJECT` and `AGENTQ_HOME`.
+- **`bin/agentq-recurring <project> <lanes.conf>`** — called from a `pre-shift`, turns a cadence
+  table (`lane | every_hours | priority | title | body`) into queued tasks when each lane is due
+  and has no open task. Markers live in `state/<project>/`. This replaces the per-lane
+  min-gap markers, locks and watchdogs the wrapper scripts used to carry.
+
+`agentq-shift` also heartbeats the run every 5 minutes while Claude works and kills Claude at
+`--max-runtime` (default: the lease), so a long run is neither reaped as abandoned nor allowed to
+hold a lane forever. Every shift runs `--model claude-fable-5-1` unless `AGENTQ_MODEL` says otherwise.
+
 ## Running it on a schedule
 
 ```sh
@@ -130,6 +153,16 @@ Two safety properties worth knowing:
 
 Dry run without spending anything: `agentq-shift cprprep --dry-run`.
 
+**Three optional tenant files**, all under `<path>/.agentq/`:
+
+- `allowed-tools` — extra Claude Code permission patterns, one per line (see below).
+- `claude-flags` — extra flags for the `claude -p` call, one per line. `--chrome` is the one that
+  matters: without it a headless run has no Claude-in-Chrome browser tools at all.
+- `pre-shift` — an executable that runs in the checkout *before* the claim, every shift. It is how a
+  tenant turns its own control surface into queue rows: the `announce` project keeps a markdown table
+  of things to announce, and its pre-shift turns every `queued` row into an `agentq add`. Editing the
+  doc is enough to make the work run on the next shift. Non-zero exit stops the shift.
+
 **Tool permissions.** Headless `claude -p` has nobody to answer a permission prompt, so any tool call
 not already allowed by `~/.claude/settings.json` is denied. The shift always grants `agentq` itself
 (`--allowedTools "Bash(agentq:*)"`) — a run that cannot call `agentq done` cannot close, its lease
@@ -137,6 +170,59 @@ expires as `failed` and the task requeues; cprprep's task 2 was claimed 25 times
 else a tenant's prompt needs goes in `<path>/.agentq/allowed-tools`, one Claude Code permission
 pattern per line (`Bash(curl:*)`, `WebFetch`, …); blank lines and `#` comments are ignored. The
 shift logs the final list as `allowed tools:` at the top of every run.
+
+## The submission ledger (`subq`)
+
+A second table in the same database, for a second problem: **the fleet kept submitting to the same
+place twice.** Fifteen lanes each kept a markdown tracker with its own never-twice list, dedupe
+meant grepping all of them, and it failed three times — the last one was the third duplicate PR to
+one repo, opened because a human session had acted outside every log.
+
+Same reasoning as the queue: a markdown claim is not a lock, and a markdown log is not an index.
+
+```sh
+subq check  --venue saashub.com --product mailkite-platform   # THE GATE
+subq record --venue saashub.com --product mailkite-platform --action form --status submitted --lane directory-submissions
+subq search saashub                    # free text over venue, notes, evidence, urls, lane
+subq history --venue betalist.com      # every attempt at one venue, newest first
+subq venues --product mailkite-server  # current state, one row per venue+product
+subq list --lane wp-plugin-promo
+subq stats
+```
+
+`check` exits **0 clear · 4 duplicate · 5 barred by a rule or refused by the venue · 6 held by
+another lane**, echoing the send-email.sh exit-code discipline the lanes already follow. There is no
+`--force`. `--url` is the submission url; the database override is `--db-url`.
+
+Three bugs came out of the first day of real use, all of them worth knowing because they are the
+kind a unit test does not think to write:
+
+- **Every GitHub URL collapsed to `github.com`**, so the first PR claimed the key and every later
+  PR to a *different* repo was refused as a duplicate. Code hosts now key as
+  `github.com/<owner>/<repo>` — a repo is the venue, the host is not. `subq rekey [--apply]`
+  migrates rows written before that, recomputing each key from its own url and reporting (never
+  merging) collisions.
+- **`--url` was both the submission url and the Postgres connection string**, so recording a PR
+  made the CLI try to speak Postgres to github.com:5432.
+- **`rejected` read as `clear`**, quietly inviting a resubmission to a venue that had already said
+  no. It is now exit 5, and only a human `void` reopens it.
+
+Three design points worth knowing:
+
+- **Dedupe is per (venue, product), not per venue.** One directory can legitimately hold the
+  platform, the OSS server and the WordPress plugin. It may not hold two of the same.
+- **The table is append-only, and one partial unique index does the enforcing:** at most one row
+  per pair with status `submitted`/`live` and `superseded_at is null`. Everything else
+  (`needs-login`, `manual`, `paid`, `skip`, `held`, `rejected`) is a non-claiming outcome that may
+  recur — which is what you want, because a login wall today is not a decision forever.
+- **`submitted → live` is a progression, not a violation.** `record --advance` supersedes the old
+  claim and inserts the new one in one transaction, so the log keeps both rows and the index keeps
+  one claim. A row recorded in error is `subq void --id <n> --why …`: the claim is released, the
+  history is not rewritten.
+
+Backfilling an existing markdown tracker is `subq import --file <jsonl>`, one JSON object per line
+with the same fields as `record`; duplicates are reported and skipped rather than aborting the
+file, because a real backfill contains collisions and those are findings.
 
 ## Commands
 
@@ -147,6 +233,7 @@ agentq claim  --project P --agent A [--lane L] [--lease SECS] [--json]
 agentq done   --run ID [--summary S] [--commit SHA]
 agentq block  --run ID --summary S              # needs a human; stays out of the queue
 agentq fail   --run ID --summary S              # requeues for retry
+agentq cancel --task ID                         # drop a queued or blocked task
 agentq heartbeat --run ID [--lease SECS]        # long job, push the lease out
 agentq status --project P
 agentq history --project P [--limit N]

@@ -13,7 +13,7 @@ export function pool(url = DEFAULT_URL) {
   return new pg.Pool({ connectionString: url, max: 4 });
 }
 
-const MIGRATIONS = ["001_init.sql", "002_heartbeat.sql", "003_project_path.sql"];
+const MIGRATIONS = ["001_init.sql", "002_heartbeat.sql", "003_project_path.sql", "004_submissions.sql"];
 
 export async function migrate(db) {
   for (const file of MIGRATIONS) {
@@ -196,7 +196,12 @@ export async function heartbeat(db, runId, leaseSeconds = 3600) {
       where id = $1 and state = 'running' returning lease_expires_at, last_heartbeat_at`,
     [runId, leaseSeconds],
   );
-  if (!rows[0]) throw new Error(`run ${runId} is not running`);
+  if (!rows[0]) {
+    // Say which terminal state the run is in: the shift's heartbeat loop must tell a run the reaper
+    // abandoned (kill the orphan) from one the agent just closed with done/block/fail (let it finish).
+    const { rows: r } = await db.query("select state from run where id = $1", [runId]);
+    throw new Error(`run ${runId} is not running (state: ${r[0]?.state ?? "no such run"})`);
+  }
   return rows[0].lease_expires_at;
 }
 
@@ -210,6 +215,16 @@ export async function addTask(db, { project, lane = "default", title, body, prio
     );
     return rows[0];
   });
+}
+
+/** Drop a task that has not started. A running task belongs to its run — finish that instead. */
+export async function cancelTask(db, taskId) {
+  const { rows } = await db.query(
+    `update task set state = 'cancelled', updated_at = now()
+     where id = $1 and state in ('queued', 'blocked') returning *`,
+    [taskId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function listTasks(db, project, states = ["queued", "running", "blocked"]) {

@@ -28,8 +28,8 @@ case "$ACTION" in
       exit 1
     fi
     [ -d "$PROJECT_PATH" ] || { echo "project path does not exist: $PROJECT_PATH" >&2; exit 1; }
-    if [ ! -f "$PROJECT_PATH/.agentq/prompt.md" ] && [ ! -f "$AGENTQ_HOME/prompts/$PROJECT.md" ]; then
-      echo "no prompt for \"$PROJECT\". Create $PROJECT_PATH/.agentq/prompt.md" >&2
+    if [ ! -f "$AGENTQ_HOME/projects/$PROJECT/prompt.md" ] && [ ! -f "$PROJECT_PATH/.agentq/prompt.md" ] && [ ! -f "$AGENTQ_HOME/prompts/$PROJECT.md" ]; then
+      echo "no prompt for \"$PROJECT\". Create $AGENTQ_HOME/projects/$PROJECT/prompt.md or $PROJECT_PATH/.agentq/prompt.md" >&2
       exit 1
     fi
 

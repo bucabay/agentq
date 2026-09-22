@@ -1,3 +1,10 @@
 node_modules/
 .env
 logs/
+
+# tenant config and runtime state, not source
+projects/
+state/
+
+# ad-hoc backups
+*.bak-*

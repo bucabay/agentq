@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import {
-  DEFAULT_URL, addTask, archiveProject, claim, finish, getProject, heartbeat, history, inFlight,
+  DEFAULT_URL, addTask, archiveProject, cancelTask, claim, finish, getProject, heartbeat, history, inFlight,
   listProjects, listTasks, migrate, pool, upsertProject,
 } from "./providers/postgres.mjs";
 
@@ -207,6 +207,13 @@ async function run() {
       break;
     }
 
+    case "cancel": {
+      const task = await cancelTask(db, Number(need("task")));
+      if (!task) die(`task #${args.task} is not queued or blocked (a running task is closed via its run)`);
+      console.log(`task #${task.id} -> cancelled`);
+      break;
+    }
+
     case "heartbeat": {
       const until = await heartbeat(db, Number(need("run")), args.lease ? Number(args.lease) : 3600);
       console.log(`lease extended to ${new Date(until).toISOString()}`);
@@ -251,6 +258,7 @@ async function run() {
   done    --run ID [--summary S] [--commit SHA]
   block   --run ID [--summary S]
   fail    --run ID [--summary S]
+  cancel  --task ID                             drop a queued or blocked task
   heartbeat --run ID [--lease SECS]
   status  --project P [--json]
   history --project P [--limit N] [--json]

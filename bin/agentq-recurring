@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# agentq-recurring — turn a cadence table into queue rows. Meant to be called from a project's
+# `pre-shift` hook, so "this lane runs every N hours" is one line in a file instead of a launchd
+# plist plus a wrapper script with its own min-gap marker, lock, watchdog and alerting.
+#
+#   agentq-recurring <project> <lanes.conf>
+#
+# lanes.conf — one lane per line, five pipe-separated fields; blank lines and # comments ignored:
+#   lane | every_hours | priority | title | body
+# The title and body may contain {date} (today, YYYY-MM-DD) and {lane}.
+#
+# A lane is enqueued when BOTH hold:
+#   1. it has no queued or running task (a blocked task waits for a human and does not count —
+#      the daily run must not stall behind it);
+#   2. its last enqueue is at least every_hours old (marker files under $AGENTQ_HOME/state).
+# Enqueue time, not completion time, is the anchor, so a lane that runs at 09:23 today is due at
+# 09:00 tomorrow and does not drift one shift later every day.
+set -euo pipefail
+PROJECT="${1:?usage: agentq-recurring <project> <lanes.conf>}"
+CONF="${2:?usage: agentq-recurring <project> <lanes.conf>}"
+AGENTQ_HOME="${AGENTQ_HOME:-$HOME/code/agents}"
+Q="$AGENTQ_HOME/bin/agentq"
+STATE="$AGENTQ_HOME/state/$PROJECT"; mkdir -p "$STATE"
+[ -f "$CONF" ] || { echo "agentq-recurring: no such file: $CONF" >&2; exit 1; }
+
+NOW="$(date +%s)"; TODAY="$(date +%F)"
+# Lanes with an open (queued/running) task, one per line.
+OPEN="$("$Q" status --project "$PROJECT" --json 2>/dev/null | node -e '
+  let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const j = JSON.parse(s);
+    const open = new Set();
+    for (const t of j.tasks ?? []) if (t.state === "queued" || t.state === "running") open.add(t.lane);
+    for (const r of j.inFlight ?? []) if (r.lane) open.add(r.lane);
+    process.stdout.write([...open].join("\n"));
+  });')"
+
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+  [ -n "$line" ] || continue
+  IFS='|' read -r lane hours prio title body <<<"$line"
+  lane="$(echo "$lane" | xargs)"; hours="$(echo "$hours" | xargs)"; prio="$(echo "$prio" | xargs)"
+  title="${title#"${title%%[![:space:]]*}"}"; title="${title%"${title##*[![:space:]]}"}"
+  body="${body#"${body%%[![:space:]]*}"}"; body="${body%"${body##*[![:space:]]}"}"
+  [ -n "$lane" ] && [ -n "$hours" ] && [ -n "$title" ] || { echo "agentq-recurring: bad line: $line" >&2; continue; }
+  if grep -qxF "$lane" <<<"$OPEN"; then
+    echo "recurring: $lane — open task exists, skip"; continue
+  fi
+  MARK="$STATE/$lane.last-enqueued"
+  LAST="$(cat "$MARK" 2>/dev/null || echo 0)"
+  DUE=$(( LAST + hours * 3600 ))
+  if [ "$NOW" -lt "$DUE" ]; then
+    echo "recurring: $lane — next due in $(( (DUE - NOW) / 60 ))m, skip"; continue
+  fi
+  title="${title//\{date\}/$TODAY}"; title="${title//\{lane\}/$lane}"
+  body="${body//\{date\}/$TODAY}";   body="${body//\{lane\}/$lane}"
+  if "$Q" add --project "$PROJECT" --lane "$lane" --priority "${prio:-50}" --title "$title" --body "$body"; then
+    echo "$NOW" > "$MARK"
+    echo "recurring: $lane — enqueued (every ${hours}h, p${prio:-50})"
+  else
+    echo "recurring: $lane — agentq add FAILED" >&2
+  fi
+done < "$CONF"

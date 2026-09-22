@@ -1,0 +1,310 @@
+{
+ "type": "canvas",
+ "version": "v1.0.0",
+ "nodes": [
+  {
+   "id": "explore",
+   "type": "text",
+   "text": "explore\nparallel",
+   "x": 11.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "7fb3d5"
+  },
+  {
+   "id": "plan",
+   "type": "text",
+   "text": "plan\nllm:planner",
+   "x": 186.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "f9e79f"
+  },
+  {
+   "id": "route",
+   "type": "text",
+   "text": "route\nchoice",
+   "x": 11911.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "e4717a"
+  },
+  {
+   "id": "implement_sidekick",
+   "type": "text",
+   "text": "implement_sidekick\nllm:sidekick",
+   "x": 11036.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "a9dfbf"
+  },
+  {
+   "id": "implement_frontier",
+   "type": "text",
+   "text": "implement_frontier\nllm:writer",
+   "x": 11036.25,
+   "y": 63.75,
+   "width": 264,
+   "height": 69.6,
+   "color": "f9e79f"
+  },
+  {
+   "id": "review",
+   "type": "text",
+   "text": "review\nllm:reviewer",
+   "x": 11211.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "f9e79f"
+  },
+  {
+   "id": "verify",
+   "type": "text",
+   "text": "verify\ntool",
+   "x": 11386.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "d5d8dc"
+  },
+  {
+   "id": "quality_gate",
+   "type": "text",
+   "text": "quality_gate\nchoice",
+   "x": 11911.25,
+   "y": 63.75,
+   "width": 264,
+   "height": 69.6,
+   "color": "e4717a"
+  },
+  {
+   "id": "fix",
+   "type": "text",
+   "text": "fix\nfix_attempt",
+   "x": 11736.25,
+   "y": 11.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "e8a0c8"
+  },
+  {
+   "id": "replan",
+   "type": "text",
+   "text": "replan\nllm:planner",
+   "x": 11736.25,
+   "y": 63.75,
+   "width": 264,
+   "height": 69.6,
+   "color": "f9e79f"
+  },
+  {
+   "id": "report",
+   "type": "text",
+   "text": "report\nllm:planner",
+   "x": 11736.25,
+   "y": 116.25,
+   "width": 264,
+   "height": 69.6,
+   "color": "f9e79f"
+  },
+  {
+   "id": "lg3",
+   "type": "text",
+   "text": "mechanical",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  },
+  {
+   "id": "lg4",
+   "type": "text",
+   "text": "judgment",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  },
+  {
+   "id": "lg5",
+   "type": "text",
+   "text": "default",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  },
+  {
+   "id": "lg10",
+   "type": "text",
+   "text": "pass",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  },
+  {
+   "id": "lg11",
+   "type": "text",
+   "text": "fix",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  },
+  {
+   "id": "lg12",
+   "type": "text",
+   "text": "default+exhaust",
+   "x": 9999,
+   "y": 9999,
+   "width": 60,
+   "height": 18,
+   "color": "333",
+   "opacity": 0.7
+  }
+ ],
+ "edges": [
+  {
+   "id": "e0",
+   "fromNode": "explore",
+   "toNode": "plan",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e1",
+   "fromNode": "plan",
+   "toNode": "route",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e2",
+   "fromNode": "route",
+   "toNode": "implement_sidekick",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "mechanical",
+   "color": "2"
+  },
+  {
+   "id": "e3",
+   "fromNode": "route",
+   "toNode": "implement_frontier",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "judgment",
+   "color": "2"
+  },
+  {
+   "id": "e4",
+   "fromNode": "route",
+   "toNode": "implement_frontier",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "default",
+   "color": "2"
+  },
+  {
+   "id": "e5",
+   "fromNode": "implement_sidekick",
+   "toNode": "review",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e6",
+   "fromNode": "implement_frontier",
+   "toNode": "review",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e7",
+   "fromNode": "review",
+   "toNode": "verify",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e8",
+   "fromNode": "verify",
+   "toNode": "quality_gate",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e9",
+   "fromNode": "quality_gate",
+   "toNode": "report",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "pass",
+   "color": "2"
+  },
+  {
+   "id": "e10",
+   "fromNode": "quality_gate",
+   "toNode": "fix",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "fix",
+   "color": "2"
+  },
+  {
+   "id": "e11",
+   "fromNode": "quality_gate",
+   "toNode": "replan",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "default+exhaust",
+   "color": "2"
+  },
+  {
+   "id": "e12",
+   "fromNode": "fix",
+   "toNode": "quality_gate",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  },
+  {
+   "id": "e13",
+   "fromNode": "replan",
+   "toNode": "route",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "color": "2"
+  }
+ ]
+}

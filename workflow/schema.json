@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./schema.json",
+  "title": "AWL - Agent Workflow Language",
+  "description": "Indented, state-machine workflow DSL for agent teams. Semantics inherit from the Amazon States Language (Choice/Parallel/Map/Retry); extended with agent routing, OTel-aligned telemetry, evidence traceability and cost estimation hooks. Indented indentation is purely visual; meaning is structural.",
+  "type": "object",
+  "required": ["format", "version", "name", "models", "agents", "start", "states"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "format": { "const": "awl" },
+    "version": { "type": "string" },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "meta": { "$ref": "#/$defs/meta" },
+    "models": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/modelDef" }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/agentDef" }
+    },
+    "telemetry": { "$ref": "#/$defs/telemetry" },
+    "subflows": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/machine" }
+    },
+    "start": { "type": "string" },
+    "states": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/stateAll" }
+    }
+  },
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "type": "string" },
+        "source": { "type": "string" },
+        "estimate": {
+          "type": "object",
+          "properties": {
+            "pricesFrom": { "type": "string" },
+            "perState": { "type": "string" },
+            "budgetUsd": { "type": "number", "minimum": 0 },
+            "refit": { "type": "boolean" }
+          },
+          "required": ["pricesFrom", "perState"]
+        }
+      }
+    },
+    "modelDef": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "usdPerMillionInput": { "type": "number", "minimum": 0 },
+        "usdPerMillionOutput": { "type": "number", "minimum": 0 },
+        "role": { "type": "string" }
+      }
+    },
+    "agentDef": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "model": { "type": "string" },
+        "readOnly": { "type": "boolean" },
+        "cleanContext": { "type": "boolean" },
+        "tools": { "type": "array", "items": { "type": "string" } },
+        "prompt": { "type": "string" },
+        "maxTurns": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "properties": {
+        "conventions": { "type": "string" },
+        "operationName": { "type": "string" },
+        "record": { "type": "array", "items": { "type": "string" } },
+        "rating": {
+          "type": "object",
+          "properties": {
+            "scale": { "type": "array", "items": { "type": "integer" } },
+            "labels": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "required": ["conventions", "record"]
+    },
+    "machine": {
+      "type": "object",
+      "required": ["start", "states"],
+      "properties": {
+        "start": { "type": "string" },
+        "states": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/stateAll" }
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "required": ["path", "op"],
+      "properties": {
+        "path": { "type": "string" },
+        "op": { "enum": ["equals", "notEquals", "gt", "gte", "lt", "lte", "contains", "exists"] },
+        "value": {}
+      }
+    },
+    "guard": {
+      "type": "object",
+      "properties": {
+        "maxIterations": { "type": "integer", "minimum": 1 },
+        "exhaustNext": { "type": "string" }
+      },
+      "required": ["maxIterations", "exhaustNext"]
+    },
+    "common": {
+      "properties": {
+        "type": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "finding"],
+            "properties": {
+              "source": { "type": "string" },
+              "finding": { "type": "string" }
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "emit": { "type": "boolean" },
+            "capture": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "expectedTokens": {
+          "type": "object",
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "end": { "type": "boolean" }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1 },
+        "backoffMs": { "type": "integer", "minimum": 0 },
+        "onExhaust": { "type": "string" }
+      },
+      "required": ["maxAttempts"]
+    },
+    "taskState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "kind"],
+          "properties": {
+            "type": { "const": "task" },
+            "kind": { "enum": ["llm", "tool"], "default": "llm" },
+            "agent": { "type": "string" },
+            "prompt": { "type": "string" },
+            "context": { "type": "object" },
+            "artifact": { "type": "object" },
+            "run": { "type": "object" },
+            "retry": { "$ref": "#/$defs/retry" },
+            "next": { "type": "string" },
+            "onFail": { "type": "string" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "kind": { "const": "llm" } }, "required": ["kind"] },
+              "then": { "required": ["agent"] }
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "choiceState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "branches", "default"],
+          "properties": {
+            "type": { "const": "choice" },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["when", "next"],
+                "properties": {
+                  "when": { "$ref": "#/$defs/condition" },
+                  "next": { "type": "string" },
+                  "label": { "type": "string" }
+                }
+              }
+            },
+            "default": { "type": "string" },
+            "guard": { "$ref": "#/$defs/guard" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "parallelState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "branches", "next"],
+          "properties": {
+            "type": { "const": "parallel" },
+            "completion": { "enum": ["all", "any"], "default": "all" },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["flow"],
+                "properties": {
+                  "label": { "type": "string" },
+                  "flow": { "type": "string" },
+                  "args": { "type": "object" }
+                }
+              }
+            },
+            "next": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "mapState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "items", "flow", "next"],
+          "properties": {
+            "type": { "const": "map" },
+            "items": { "type": "object" },
+            "flow": { "type": "string" },
+            "concurrency": { "type": "integer", "minimum": 1 },
+            "maxIterations": { "type": "integer", "minimum": 1 },
+            "next": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "callState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "flow", "next"],
+          "properties": {
+            "type": { "const": "call" },
+            "flow": { "type": "string" },
+            "args": { "type": "object" },
+            "next": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "approvalState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "prompt", "nextOnApprove"],
+          "properties": {
+            "type": { "const": "approval" },
+            "prompt": { "type": "string" },
+            "nextOnApprove": { "type": "string" },
+            "nextOnReject": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "passState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type", "next"],
+          "properties": {
+            "type": { "const": "pass" },
+            "assign": { "type": "object" },
+            "next": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "succeedState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": { "type": { "const": "succeed" } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "failState": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "fail" },
+            "error": { "type": "string" },
+            "cause": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "stateAll": {
+      "oneOf": [
+        { "$ref": "#/$defs/taskState" },
+        { "$ref": "#/$defs/choiceState" },
+        { "$ref": "#/$defs/parallelState" },
+        { "$ref": "#/$defs/mapState" },
+        { "$ref": "#/$defs/callState" },
+        { "$ref": "#/$defs/approvalState" },
+        { "$ref": "#/$defs/passState" },
+        { "$ref": "#/$defs/succeedState" },
+        { "$ref": "#/$defs/failState" }
+      ]
+    }
+  }
+}

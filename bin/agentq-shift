@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # agentq-shift — the durable trigger. One shift for one project, driven by launchd.
 #
-#   agentq-shift <project> [--agent NAME] [--lease SECS] [--dry-run]
+#   agentq-shift <project> [--agent NAME] [--lease SECS] [--max-runtime SECS] [--dry-run]
 #
-# Per-project knobs, both optional, both in <path>/.agentq/: `allowed-tools` (Claude Code
-# permission patterns, one per line) and `claude-flags` (extra `claude -p` flags, e.g. --chrome).
+# While Claude runs, the shift heartbeats the run every 5 minutes so a long task is not reaped
+# as abandoned at the lease boundary, and a watchdog kills Claude at --max-runtime (default: the
+# lease) so a hung session cannot hold the lane forever.
+#
+# Per-project knobs, all optional, read from the project's CONF dir — the first of:
+#   $AGENTQ_HOME/projects/<project>/   (config kept outside the checkout: public repos, worktrees
+#                                       that get reset, or several projects sharing one checkout)
+#   <path>/.agentq/                    (config that travels with the code)
+# Files: `prompt.md`, `allowed-tools` (Claude Code permission patterns, one per line), `claude-flags`
+# (extra `claude -p` flags, one per line, e.g. --chrome), `pre-shift` (an executable run in the
+# checkout before the claim, e.g. to turn a control doc or a cadence table into queue rows) and
+# `env` (a bash fragment SOURCED in the checkout after the pre-shift and before the claim: exports
+# credentials and identity for the run, may `return 1` to stop the shift before anything is spent).
+# Both hooks see AGENTQ_PROJECT and AGENTQ_HOME in their environment.
 #
 # The important property: IT CLAIMS BEFORE IT SPENDS ANYTHING. If the queue is empty or every
 # lane is held, the claim exits 3 and we stop — no Claude invocation, no tokens, no cost. An idle
@@ -21,16 +33,19 @@ shift
 AGENTQ_HOME="${AGENTQ_HOME:-$HOME/code/agents}"
 AGENT="shift-$(hostname -s)"
 LEASE=3600
+MAX_RUNTIME=""
 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent) AGENT="$2"; shift 2 ;;
     --lease) LEASE="$2"; shift 2 ;;
+    --max-runtime) MAX_RUNTIME="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) echo "agentq-shift: unknown option $1" >&2; exit 2 ;;
   esac
 done
 
+[ -n "$MAX_RUNTIME" ] || MAX_RUNTIME="$LEASE"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
 Q="$AGENTQ_HOME/bin/agentq"
@@ -65,24 +80,63 @@ IFS="$US" read -r PROJECT_DIR PROMPT_OVERRIDE ARCHIVED <<<"$(printf '%s' "$PROJE
 [ -n "$PROJECT_DIR" ] || { say "project \"$PROJECT\" has no path — set one: agentq project set --name $PROJECT --path /abs/path"; exit 1; }
 [ -d "$PROJECT_DIR" ] || { say "project path does not exist: $PROJECT_DIR"; exit 1; }
 
-# Prompt resolution, most specific first. A project carrying its own prompt in .agentq/prompt.md is
+# Config dir: an explicit per-project dir under AGENTQ_HOME wins over the checkout's .agentq/.
+# The override exists for checkouts that cannot carry their own config — a public repo, a
+# worktree that is reset every run, or two projects that share one checkout.
+if [ -d "$AGENTQ_HOME/projects/$PROJECT" ]; then
+  CONF="$AGENTQ_HOME/projects/$PROJECT"
+else
+  CONF="$PROJECT_DIR/.agentq"
+fi
+
+# Prompt resolution, most specific first. A project carrying its own prompt in its conf dir is
 # the multi-tenant default: the instructions live with the code they describe and travel with it.
 if [ -n "$PROMPT_OVERRIDE" ] && [ -f "$PROMPT_OVERRIDE" ]; then
   PROMPT_FILE="$PROMPT_OVERRIDE"
-elif [ -f "$PROJECT_DIR/.agentq/prompt.md" ]; then
-  PROMPT_FILE="$PROJECT_DIR/.agentq/prompt.md"
+elif [ -f "$CONF/prompt.md" ]; then
+  PROMPT_FILE="$CONF/prompt.md"
 elif [ -f "$AGENTQ_HOME/prompts/$PROJECT.md" ]; then
   PROMPT_FILE="$AGENTQ_HOME/prompts/$PROJECT.md"
 else
-  say "no prompt found. Looked at: \$prompt_path, $PROJECT_DIR/.agentq/prompt.md, $AGENTQ_HOME/prompts/$PROJECT.md"
+  say "no prompt found. Looked at: \$prompt_path, $CONF/prompt.md, $AGENTQ_HOME/prompts/$PROJECT.md"
   exit 1
 fi
 
-say "shift start · project=$PROJECT agent=$AGENT lease=${LEASE}s"
+say "shift start · project=$PROJECT agent=$AGENT lease=${LEASE}s max-runtime=${MAX_RUNTIME}s"
 say "  dir:    $PROJECT_DIR"
+say "  conf:   $CONF"
 say "  prompt: $PROMPT_FILE"
 
 cd "$PROJECT_DIR" || { say "cannot cd to $PROJECT_DIR"; exit 1; }
+export AGENTQ_PROJECT="$PROJECT" AGENTQ_HOME
+
+# --- pre-shift hook: the tenant gets a turn BEFORE the claim ----------------
+# <project>/.agentq/pre-shift, if executable, runs in the checkout before anything is claimed. Its
+# job is to turn the tenant's own control surface into queue rows — e.g. a markdown doc a human
+# edits, whose `queued` lines become `agentq add` calls — so "write it in the doc" is enough to
+# make it run on the next shift. It runs every shift, including ones that then find no work,
+# because that is exactly when a freshly queued row needs to become a task. Non-zero exit stops
+# the shift.
+if [ -x "$CONF/pre-shift" ]; then
+  say "pre-shift: $CONF/pre-shift"
+  if ! "$CONF/pre-shift" >>"$LOG" 2>&1; then
+    say "pre-shift failed — stopping before the claim"
+    exit 1
+  fi
+fi
+
+# --- env hook: credentials and identity for the run, still BEFORE the claim ----
+# <conf>/env is sourced, not executed, so what it exports (a GitHub token read off the secrets
+# volume, GIT_AUTHOR_*, MK_AGENT, PATH additions) reaches Claude and every tool it spawns. It runs
+# every shift and may `return 1` after logging why — a missing credential stops the shift here,
+# where it costs nothing, instead of inside a claimed run that then fails and requeues.
+if [ -f "$CONF/env" ]; then
+  say "env: $CONF/env"
+  if ! . "$CONF/env" >>"$LOG" 2>&1; then
+    say "env hook failed — stopping before the claim"
+    exit 1
+  fi
+fi
 
 # --- claim first. Nothing is spent until this succeeds. -----------------------
 CLAIM="$("$Q" claim --project "$PROJECT" --agent "$AGENT" --lease "$LEASE" --json 2>>"$LOG")"
@@ -144,36 +198,77 @@ $CLAIM
 # already allowed by ~/.claude/settings.json is DENIED. `agentq` itself is therefore always granted
 # here: a run that cannot call `agentq done` cannot close, its lease expires as failed and the task
 # requeues — cprprep's task 2 was claimed 25 times that way before this line existed.
-# A tenant grants whatever else its prompt needs in <project>/.agentq/allowed-tools, one Claude Code
+# A tenant grants whatever else its prompt needs in <conf>/allowed-tools, one Claude Code
 # permission pattern per line (e.g. `Bash(curl:*)`, `WebFetch`); blank lines and # comments ignored.
 ALLOWED=("Bash(agentq:*)" "Bash($Q:*)")
-if [ -f "$PROJECT_DIR/.agentq/allowed-tools" ]; then
+if [ -f "$CONF/allowed-tools" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] && ALLOWED+=("$line")
-  done < "$PROJECT_DIR/.agentq/allowed-tools"
+  done < "$CONF/allowed-tools"
 fi
 say "allowed tools: ${ALLOWED[*]}"
 
+# --- model ----------------------------------------------------------------------
+# Every shift runs Claude Fable 5.1 unless AGENTQ_MODEL says otherwise. Pinned here rather than
+# inherited from ~/.claude/settings.json so a settings edit cannot silently move the fleet to a
+# different model. A tenant can still override per project with `--model X` in .agentq/claude-flags
+# (tenant flags come after this one, so the later --model wins).
+MODEL="${AGENTQ_MODEL:-claude-fable-5-1}"
+say "model: $MODEL"
+
 # --- extra claude flags --------------------------------------------------------
 # A tenant that needs more than the default headless session lists flags in
-# <project>/.agentq/claude-flags, one per line (blank lines and # comments ignored). The
+# <conf>/claude-flags, one per line (a flag and its value go on separate lines) (blank lines and # comments ignored). The
 # promotion lanes use `--chrome` so the run gets the claude-in-chrome extension tools; a plain
 # `claude -p` has no browser tools at all.
 FLAGS=()
-if [ -f "$PROJECT_DIR/.agentq/claude-flags" ]; then
+if [ -f "$CONF/claude-flags" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] && FLAGS+=("$line")
-  done < "$PROJECT_DIR/.agentq/claude-flags"
+  done < "$CONF/claude-flags"
 fi
 [ ${#FLAGS[@]} -gt 0 ] && say "claude flags: ${FLAGS[*]}"
 
 say "invoking claude"
-echo "$PROMPT" | claude -p ${FLAGS[@]+"${FLAGS[@]}"} --permission-mode acceptEdits --allowedTools "${ALLOWED[@]}" >>"$LOG" 2>&1
-CLAUDE_STATUS=$?
+export AGENTQ_RUN_ID="$RUN_ID"
+echo "$PROMPT" | claude -p --model "$MODEL" ${FLAGS[@]+"${FLAGS[@]}"} --permission-mode acceptEdits --allowedTools "${ALLOWED[@]}" >>"$LOG" 2>&1 &
+CLAUDE_PID=$!
+# Heartbeat: extend the lease every 5 minutes while Claude is alive, so a legitimately long run
+# is not reaped as "abandoned" at the lease boundary and re-claimed on top of itself.
+# If the heartbeat reports the run is gone (the lease expired and the reaper closed it — e.g. the
+# laptop slept through the 5-minute tick, 2026-09-09), nothing this session does can be recorded
+# any more: stop Claude instead of leaving an orphan that burns model quota and collides with the
+# next shift's claim of the same task.
+( while kill -0 "$CLAUDE_PID" 2>/dev/null; do
+    sleep 300; kill -0 "$CLAUDE_PID" 2>/dev/null || break
+    HB="$("$Q" heartbeat --run "$RUN_ID" --lease "$LEASE" 2>&1)"; echo "$HB" >>"$LOG"
+    case "$HB" in
+      *"is not running (state: done)"*|*"is not running (state: failed)"*|*"is not running (state: blocked)"*)
+        # The agent closed its own run (agentq done/fail/block) and is still wrapping up — that is not
+        # an orphan. Stop heartbeating and let it exit on its own; the MAX_RUNTIME watchdog still bounds it.
+        echo "[$(date -u +%H:%M:%SZ)] heartbeat: run #$RUN_NO already closed by the agent — letting claude finish" >>"$LOG"
+        break ;;
+      *"is not running"*)
+      echo "[$(date -u +%H:%M:%SZ)] watchdog: run #$RUN_NO was reaped while claude was still alive — SIGTERM" >>"$LOG"
+      kill -TERM "$CLAUDE_PID" 2>/dev/null || true; sleep 30
+      kill -0 "$CLAUDE_PID" 2>/dev/null && { echo "[$(date -u +%H:%M:%SZ)] watchdog: still alive — SIGKILL" >>"$LOG"; kill -KILL "$CLAUDE_PID" 2>/dev/null || true; }
+      break ;;
+    esac
+  done ) &
+HEARTBEAT_PID=$!
+# Watchdog: a hung session must not hold the lane forever. TERM at MAX_RUNTIME, KILL 30s later.
+( sleep "$MAX_RUNTIME"; if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+    echo "[$(date -u +%H:%M:%SZ)] watchdog: claude exceeded ${MAX_RUNTIME}s — SIGTERM" >>"$LOG"
+    kill -TERM "$CLAUDE_PID" 2>/dev/null || true; sleep 30
+    kill -0 "$CLAUDE_PID" 2>/dev/null && { echo "[$(date -u +%H:%M:%SZ)] watchdog: still alive — SIGKILL" >>"$LOG"; kill -KILL "$CLAUDE_PID" 2>/dev/null || true; }
+  fi ) &
+WATCHDOG_PID=$!
+wait "$CLAUDE_PID"; CLAUDE_STATUS=$?
+kill "$HEARTBEAT_PID" "$WATCHDOG_PID" 2>/dev/null || true
 say "claude exited $CLAUDE_STATUS"
 
 # --- safety net -------------------------------------------------------------
